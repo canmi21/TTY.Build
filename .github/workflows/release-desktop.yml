@@ -15,7 +15,7 @@ concurrency:
 jobs:
   release:
     name: Build, notarize, and publish
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 45
     env:
       TTYBUILD_DESKTOP_OUTPUT_DIR: ${{ github.workspace }}/.artifacts/desktop-release

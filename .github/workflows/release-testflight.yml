@@ -32,7 +32,7 @@ concurrency:
 jobs:
   release:
     name: Validate, sign, and publish
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 150
     env:
       ASC_APP_ID: "6792312114"
