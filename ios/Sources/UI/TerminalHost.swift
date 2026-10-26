@@ -39,28 +39,46 @@ final class TerminalHost {
 
     var isTextSelectionActive: Bool { selectionOverlay != nil }
 
-    /// While a replay snapshot is being digested, the emulator re-answers any
-    /// terminal queries (DA, DECRQM, …) contained in the replayed history.
-    /// Those auto-responses — all ESC-prefixed control sequences — must not
-    /// reach the PTY (the host answered them long ago) or the shell echoes them
-    /// as garbage. Only ESC-prefixed writes are muted, so keystrokes the user
-    /// types right after a reconnect/replay still go through.
-    private var muteInputUntil: Date?
-
     private let session: InMemoryTerminalSession
+    private let relay: Relay
 
     /// Weak trampoline so the `@Sendable` emulator callbacks (fired off-main)
     /// can reach the main-actor host without a retain cycle.
+    ///
+    /// It also owns the replay mute. While a replay snapshot's history is
+    /// being digested, the emulator re-answers any terminal queries (DA,
+    /// DECRQM, …) contained in it. Those auto-responses must not reach the PTY
+    /// (whoever was attached answered them long ago) or the shell echoes them
+    /// as garbage. The mute is checked on the emulator thread as each reply is
+    /// generated, so it covers exactly the replayed history: live output parsed
+    /// afterwards is answered even if it arrives a moment later.
     private final class Relay: @unchecked Sendable {
         weak var host: TerminalHost?
+        private let lock = NSLock()
+        private var muteQueryRepliesUntil = Date.distantPast
+
+        var mutesQueryReplies: Bool {
+            lock.withLock { Date() < muteQueryRepliesUntil }
+        }
+
+        func muteQueryReplies(until deadline: Date) {
+            lock.withLock { muteQueryRepliesUntil = deadline }
+        }
     }
 
     init(controller: TerminalController) {
         self.controller = controller
 
         let relay = Relay()
+        self.relay = relay
         session = InMemoryTerminalSession(
             write: { data in
+                // Only the emulator's query replies are muted. Keyboard input
+                // can start with ESC too (bare Esc, arrow keys, Alt+letter) and
+                // must pass through even while a replay is being digested.
+                if relay.mutesQueryReplies, TerminalHost.isEmulatorQueryReply(data) {
+                    return
+                }
                 Task { @MainActor in relay.host?.handleInput(data) }
             },
             // Ghostty fires this callback while a grid resize is still queued
@@ -240,10 +258,25 @@ final class TerminalHost {
     /// scrollback) so a reconnect replay doesn't duplicate earlier output.
     /// Also applied while hidden — a pooled channel's reconnect replay is
     /// what keeps the background emulator in sync.
+    ///
+    /// Replies to queries in the replayed history are muted, but the trailing
+    /// control-only run is fed unmuted once the history is parsed: a process
+    /// can be blocked on a query there that nothing has answered yet (fish
+    /// waits for its startup DA1 reply before printing a prompt).
     func feedReplay(_ data: Data) {
-        muteInputUntil = Date().addingTimeInterval(0.5)
+        let (history, pending) = TerminalReplayTail.split(data)
+        relay.muteQueryReplies(until: .distantFuture)
         session.receive(Data("\u{1b}c\u{1b}[3J".utf8))
-        session.receive(data)
+        session.receive(history)
+        if session.waitForPendingOutput() {
+            relay.muteQueryReplies(until: .distantPast)
+        } else {
+            // No surface is attached yet, so the history is parsed only when
+            // one attaches. Bound the mute in time instead of holding it until
+            // then; a reply it lets through is a stray sequence, not a hang.
+            relay.muteQueryReplies(until: Date().addingTimeInterval(0.5))
+        }
+        session.receive(pending)
         // Both the RIS above and any reset inside the replayed history clear
         // mode 2048, which the applied-resize pipeline depends on. Re-arming
         // also makes the emulator re-report its current grid, refreshing the
@@ -285,16 +318,6 @@ final class TerminalHost {
         }
         guard !data.isEmpty else { return }
 
-        if let until = muteInputUntil {
-            if Date() < until {
-                // Drop only the emulator's query replies. Keyboard input can
-                // start with ESC too (bare Esc, arrow keys, Alt+letter) and
-                // must pass through even inside the mute window.
-                if Self.isEmulatorQueryReply(data) { return }
-            } else {
-                muteInputUntil = nil
-            }
-        }
         // Software-key input is consumed by libghostty's sticky path before it
         // reaches this callback. A hardware keyboard, including Simulator's
         // Mac keyboard bridge, bypasses `insertText` and arrives here as one
@@ -317,7 +340,7 @@ final class TerminalHost {
     /// CSI reports terminating in `c` (DA), `n` (DSR), `y` (DECRQM), `R` (CPR),
     /// and DCS/OSC responses. Keyboard sequences are different shapes — bare
     /// ESC, `ESC [ A…D` arrows, `ESC O …`, Alt+letter — and all return false.
-    private static func isEmulatorQueryReply(_ data: Data) -> Bool {
+    nonisolated private static func isEmulatorQueryReply(_ data: Data) -> Bool {
         guard data.count >= 3, data.first == 0x1b, let last = data.last
         else { return false }
         switch data[data.index(data.startIndex, offsetBy: 1)] {
