@@ -596,6 +596,9 @@ final class MainViewController: UIViewController {
             page.overlay.onClaim = { [weak self] in
                 self?.manager.claimTerminal(id)
             }
+            page.host.onCloseRequest = { [weak self] in
+                self?.closeTerminal(id)
+            }
             page.host.onModifierStateChange = { [weak self] state in
                 guard let self, visibleId == id else { return }
                 toolbar.setModifierState(state)
@@ -799,7 +802,8 @@ final class MainViewController: UIViewController {
 
     /// A clean exit is the user ending the shell on purpose (`exit`, Ctrl-D),
     /// so its tab closes like a terminal window. Any other status keeps the
-    /// tab with its last output and Ghostty's exit message.
+    /// tab with its last output and Ghostty's exit message; a key press then
+    /// closes it through `onCloseRequest`.
     private func handleExit(id: TerminalID, code: Int) {
         if TerminalExitPolicy.closesTab(exitCode: code) {
             closeTerminal(id)
