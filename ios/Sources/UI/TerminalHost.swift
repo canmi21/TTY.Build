@@ -42,6 +42,9 @@ final class TerminalHost {
     private let session: InMemoryTerminalSession
     private let relay: Relay
 
+    /// The visible grid as text, one line per row.
+    var viewportText: String? { session.readViewportText() }
+
     /// Weak trampoline so the `@Sendable` emulator callbacks (fired off-main)
     /// can reach the main-actor host without a retain cycle.
     ///
@@ -295,8 +298,15 @@ final class TerminalHost {
 
     /// Surface the remote process exit inside the emulator. Also applied
     /// while hidden so a pooled page shows the exit when paged back to.
-    func markExited(code: Int) {
-        session.finish(exitCode: UInt32(clamping: max(0, code)), runtimeMilliseconds: 0)
+    ///
+    /// `runtime` is how long the session lived. Ghostty reports a short-lived
+    /// non-zero exit as a failed launch, so a constant 0 would label every
+    /// such exit "failed to launch".
+    func markExited(code: Int, runtime: TimeInterval) {
+        session.finish(
+            exitCode: UInt32(clamping: max(0, code)),
+            runtimeMilliseconds: UInt64(max(0, runtime) * 1000)
+        )
         kickRender()
     }
 
